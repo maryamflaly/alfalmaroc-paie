@@ -210,11 +210,14 @@ async function fsSet(docName, value) {
 }
 
 async function loadCloudData() {
-  await new Promise(resolve => {
-    if (window.__fb) return resolve();
-    window.addEventListener('firebase-ready', resolve, { once: true });
-  });
   try {
+    await Promise.race([
+      new Promise(resolve => {
+        if (window.__fb) return resolve();
+        window.addEventListener('firebase-ready', resolve, { once: true });
+      }),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('timeout-init')), 8000))
+    ]);
     const [company, records, masterCode] = await Promise.all([
       fsGet('company', defaultCompany()),
       fsGet('records', []),
@@ -223,9 +226,11 @@ async function loadCloudData() {
     state.company = company;
     state.savedRecords = records;
     state._masterCode = masterCode;
+    state.cloudError = false;
   } catch (err) {
     console.error('Firestore load error:', err);
-    state.errorMessage = 'تعذر الاتصال بالسيرفر. تحقق من الإنترنت.';
+    state.cloudError = true;
+    state.errorMessage = 'تعذر الاتصال بقاعدة البيانات (Firestore). تحقق من الإنترنت أو من Security Rules فـ Firebase Console.';
   } finally {
     state.isLoadingCloud = false;
     render();
@@ -472,7 +477,7 @@ function render() {
       </div>`;
     return;
   }
-  if (state.errorMessage && !state.currentUser && state.savedRecords.length === 0) {
+  if (state.cloudError) {
     app.innerHTML = `
       <div class="min-h-screen flex flex-col items-center justify-center bg-gray-50 gap-3 px-6 text-center">
         <p class="text-red-700 font-bold">${esc(state.errorMessage)}</p>
