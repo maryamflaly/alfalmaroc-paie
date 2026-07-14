@@ -17,6 +17,28 @@
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
 
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
+  import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+
+  const firebaseConfig = {
+    apiKey: "AIzaSyACL7vqFVrBMdhHQbbVmAg_WO4uzHO6qcE",
+    authDomain: "alfalmaroc-paie.firebaseapp.com",
+    projectId: "alfalmaroc-paie",
+    storageBucket: "alfalmaroc-paie.firebasestorage.app",
+    messagingSenderId: "927231131355",
+    appId: "1:927231131355:web:c09f04707678bfdaf6d6fe",
+    measurementId: "G-FP52CFFQ9E"
+  };
+
+  const fbApp = initializeApp(firebaseConfig);
+  const db = getFirestore(fbApp);
+
+  // نخبيو هاد الأدوات فـ window باش الكود القديم (غير module) يقدر يستعملهم
+  window.__fb = { db, doc, getDoc, setDoc };
+  window.dispatchEvent(new Event('firebase-ready'));
+</script>
+
 <style>
   @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@300;400;500;700&display=swap');
 
@@ -150,8 +172,9 @@ let state = {
   viewMode: 'list',
   isPrintPreview: false,
   isSaving: false,
-  company: JSON.parse(localStorage.getItem(LS.COMPANY) || 'null') || defaultCompany(),
-  savedRecords: JSON.parse(localStorage.getItem(LS.DB) || '[]'),
+  isLoadingCloud: true,
+  company: defaultCompany(),
+  savedRecords: [],
   currentRecordId: null,
   employee: getEmptyEmployee(),
   rubriques: getDefaultRubriques(),
@@ -172,15 +195,51 @@ function isAppInstalled() {
   return window.matchMedia('(display-mode: standalone)').matches || window.navigator.standalone === true;
 }
 
-/* ==================== PERSISTENCE ==================== */
-function persistCompany() { localStorage.setItem(LS.COMPANY, JSON.stringify(state.company)); }
-function persistDb() { localStorage.setItem(LS.DB, JSON.stringify(state.savedRecords)); }
+/* ==================== PERSISTENCE (Firestore) ==================== */
+// كل بيانات الشركة (records / admins / company / masterCode) كتخبا فـ Firestore
+// باش تكون مشتركة بين كل الأجهزة (Espace Gérant و Espace Salarié).
+function fb() { return window.__fb; }
+async function fsGet(docName, fallback) {
+  const { db, doc, getDoc } = fb();
+  const snap = await getDoc(doc(db, 'alfalmaroc_paie', docName));
+  return snap.exists() ? snap.data().value : fallback;
+}
+async function fsSet(docName, value) {
+  const { db, doc, setDoc } = fb();
+  await setDoc(doc(db, 'alfalmaroc_paie', docName), { value });
+}
+
+async function loadCloudData() {
+  await new Promise(resolve => {
+    if (window.__fb) return resolve();
+    window.addEventListener('firebase-ready', resolve, { once: true });
+  });
+  try {
+    const [company, records, masterCode] = await Promise.all([
+      fsGet('company', defaultCompany()),
+      fsGet('records', []),
+      fsGet('masterCode', '0000')
+    ]);
+    state.company = company;
+    state.savedRecords = records;
+    state._masterCode = masterCode;
+  } catch (err) {
+    console.error('Firestore load error:', err);
+    state.errorMessage = 'تعذر الاتصال بالسيرفر. تحقق من الإنترنت.';
+  } finally {
+    state.isLoadingCloud = false;
+    render();
+  }
+}
+
+function persistCompany() { fsSet('company', state.company).catch(err => console.error(err)); }
+function persistDb() { fsSet('records', state.savedRecords).catch(err => console.error(err)); }
 function persistUser() {
   if (state.currentUser) localStorage.setItem(LS.USER, JSON.stringify(state.currentUser));
   else localStorage.removeItem(LS.USER);
 }
-function getMasterCode() { return localStorage.getItem(LS.MASTER_CODE) || '0000'; }
-function setMasterCode(code) { localStorage.setItem(LS.MASTER_CODE, code); }
+function getMasterCode() { return state._masterCode || '0000'; }
+function setMasterCode(code) { state._masterCode = code; fsSet('masterCode', code).catch(err => console.error(err)); }
 
 function saveCurrentRecord() {
   const id = state.currentRecordId || uid();
@@ -222,8 +281,8 @@ function updateSaveIndicator() {
 /* ==================== AUTH ==================== */
 function isAdmin() { return state.currentUser && state.currentUser.role === 'admin'; }
 
-function loginAdmin(email, pass) {
-  const users = JSON.parse(localStorage.getItem(LS.ADMIN_DB) || '[]');
+async function loginAdmin(email, pass) {
+  const users = await fsGet('admins', []);
   const found = users.find(u => (u.email || '').toLowerCase() === email.toLowerCase() && u.password === pass);
   if (found) {
     const { password, ...safe } = found;
@@ -233,13 +292,13 @@ function loginAdmin(email, pass) {
   }
   return false;
 }
-function signupAdmin(name, email, pass) {
+async function signupAdmin(name, email, pass) {
   if (!name || !email || !pass) return false;
-  const users = JSON.parse(localStorage.getItem(LS.ADMIN_DB) || '[]');
+  const users = await fsGet('admins', []);
   if (users.some(u => (u.email || '').toLowerCase() === email.toLowerCase())) return false;
   const newUser = { id: uid(), name, email, role: 'admin', password: pass };
   users.push(newUser);
-  localStorage.setItem(LS.ADMIN_DB, JSON.stringify(users));
+  await fsSet('admins', users);
   const { password, ...safe } = newUser;
   state.currentUser = safe;
   persistUser();
@@ -405,6 +464,22 @@ function removeRubrique(id) {
 /* ==================== RENDER ROOT ==================== */
 function render() {
   const app = document.getElementById('app');
+  if (state.isLoadingCloud) {
+    app.innerHTML = `
+      <div class="min-h-screen flex flex-col items-center justify-center bg-gray-50 gap-4 px-6 text-center">
+        <div class="w-10 h-10 border-4 border-red-700 border-t-transparent rounded-full animate-spin"></div>
+        <p class="text-gray-500">جاري تحميل البيانات...</p>
+      </div>`;
+    return;
+  }
+  if (state.errorMessage && !state.currentUser && state.savedRecords.length === 0) {
+    app.innerHTML = `
+      <div class="min-h-screen flex flex-col items-center justify-center bg-gray-50 gap-3 px-6 text-center">
+        <p class="text-red-700 font-bold">${esc(state.errorMessage)}</p>
+        <button onclick="location.reload()" class="bg-red-700 text-white px-4 py-2 rounded-lg">إعادة المحاولة</button>
+      </div>`;
+    return;
+  }
   if (!state.currentUser) {
     app.innerHTML = renderAuthScreen();
     attachAuthEvents();
@@ -512,13 +587,14 @@ function attachAuthEvents() {
   const toggleBtn = document.getElementById('toggle-admin-mode');
   if (toggleBtn) toggleBtn.onclick = () => { state.isAdminLoginMode = !state.isAdminLoginMode; state.errorMessage = null; render(); };
   const adminForm = document.getElementById('admin-form');
-  if (adminForm) adminForm.onsubmit = (e) => {
+  if (adminForm) adminForm.onsubmit = async (e) => {
     e.preventDefault();
     state.errorMessage = null;
     if (state.isAdminLoginMode) {
       const email = document.getElementById('admin-email').value.trim();
       const pass = document.getElementById('admin-pass').value;
-      if (!loginAdmin(email, pass)) { state.errorMessage = 'Email ou mot de passe incorrect.'; render(); return; }
+      const ok = await loginAdmin(email, pass);
+      if (!ok) { state.errorMessage = 'Email ou mot de passe incorrect.'; render(); return; }
       render();
     } else {
       const code = document.getElementById('admin-code').value.trim();
@@ -526,7 +602,8 @@ function attachAuthEvents() {
       const email = document.getElementById('admin-email').value.trim();
       const pass = document.getElementById('admin-pass').value;
       if (code !== getMasterCode()) { state.errorMessage = 'Code secret incorrect.'; render(); return; }
-      if (!signupAdmin(name, email, pass)) { state.errorMessage = 'Cet email est déjà utilisé.'; render(); return; }
+      const ok = await signupAdmin(name, email, pass);
+      if (!ok) { state.errorMessage = 'Cet email est déjà utilisé.'; render(); return; }
       render();
     }
   };
@@ -1220,7 +1297,8 @@ window.addEventListener('beforeinstallprompt', (e) => {
   deferredInstallPrompt = e;
   render();
 });
-render();
+render(); // كنعرضو شاشة "التحميل" فأول وهلة
+loadCloudData(); // مباشرة بعدها كنجيبو البيانات من Firestore وكنرندريو من جديد
 </script>
 </body>
 </html>
