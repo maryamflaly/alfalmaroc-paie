@@ -20,6 +20,12 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
+  import {
+    getAuth,
+    signInWithEmailAndPassword,
+    createUserWithEmailAndPassword,
+    signOut
+  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyACL7vqFVrBMdhHQbbVmAg_WO4uzHO6qcE",
@@ -33,9 +39,13 @@
 
   const fbApp = initializeApp(firebaseConfig);
   const db = getFirestore(fbApp);
+  const auth = getAuth(fbApp);
 
   // نخبيو هاد الأدوات فـ window باش الكود القديم (غير module) يقدر يستعملهم
-  window.__fb = { db, doc, getDoc, setDoc };
+  window.__fb = {
+    db, doc, getDoc, setDoc,
+    auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut
+  };
   window.dispatchEvent(new Event('firebase-ready'));
 </script>
 
@@ -287,33 +297,55 @@ function updateSaveIndicator() {
 function isAdmin() { return state.currentUser && state.currentUser.role === 'admin'; }
 
 async function loginAdmin(email, pass) {
-  const users = await fsGet('admins', []);
-  const found = users.find(u => (u.email || '').toLowerCase() === email.toLowerCase() && u.password === pass);
-  if (found) {
-    const { password, ...safe } = found;
+  const { auth, signInWithEmailAndPassword } = fb();
+  try {
+    // التحقق الحقيقي من كلمة المرور يتم عند Firebase (مشفّر)، لا نخزّنها أبدًا محليًا
+    const cred = await signInWithEmailAndPassword(auth, email, pass);
+    const uidVal = cred.user.uid;
+    const users = await fsGet('admins', []);
+    let profile = users.find(u => u.uid === uidVal || (u.email || '').toLowerCase() === email.toLowerCase());
+    if (!profile) {
+      // مستخدم موجود فـ Firebase Auth بلا بروفايل فـ Firestore (حالة نادرة) - نديرو بروفايل افتراضي
+      profile = { id: uid(), uid: uidVal, name: email.split('@')[0], email, role: 'admin' };
+      users.push(profile);
+      await fsSet('admins', users);
+    }
+    const { password, ...safe } = profile; // نتأكدو ما فيهش password (توافقية مع بيانات قديمة)
     state.currentUser = safe;
     persistUser();
     return true;
+  } catch (err) {
+    console.error('loginAdmin error:', err.code || err);
+    return false;
   }
-  return false;
 }
 async function signupAdmin(name, email, pass) {
   if (!name || !email || !pass) return false;
-  const users = await fsGet('admins', []);
-  if (users.some(u => (u.email || '').toLowerCase() === email.toLowerCase())) return false;
-  const newUser = { id: uid(), name, email, role: 'admin', password: pass };
-  users.push(newUser);
-  await fsSet('admins', users);
-  const { password, ...safe } = newUser;
-  state.currentUser = safe;
-  persistUser();
-  return true;
+  const { auth, createUserWithEmailAndPassword } = fb();
+  try {
+    const cred = await createUserWithEmailAndPassword(auth, email, pass);
+    const uidVal = cred.user.uid;
+    const users = await fsGet('admins', []);
+    const newUser = { id: uid(), uid: uidVal, name, email, role: 'admin' }; // بلا password إطلاقًا
+    users.push(newUser);
+    await fsSet('admins', users);
+    state.currentUser = newUser;
+    persistUser();
+    return true;
+  } catch (err) {
+    console.error('signupAdmin error:', err.code || err);
+    return false;
+  }
 }
 function loginAsEmployee(name, matricule, accessCode) {
   state.currentUser = { id: 'emp_' + uid(), name, identifier: matricule || name, accessCode: accessCode || '', role: 'employee' };
   persistUser();
 }
 function logout() {
+  const { auth, signOut } = fb();
+  if (state.currentUser && state.currentUser.role === 'admin') {
+    signOut(auth).catch(err => console.error('signOut error:', err));
+  }
   state.currentUser = null;
   persistUser();
   render();
