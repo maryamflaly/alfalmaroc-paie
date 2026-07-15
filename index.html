@@ -20,12 +20,6 @@
 <script type="module">
   import { initializeApp } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-app.js";
   import { getFirestore, doc, getDoc, setDoc } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-firestore.js";
-  import {
-    getAuth,
-    signInWithEmailAndPassword,
-    createUserWithEmailAndPassword,
-    signOut
-  } from "https://www.gstatic.com/firebasejs/10.13.0/firebase-auth.js";
 
   const firebaseConfig = {
     apiKey: "AIzaSyACL7vqFVrBMdhHQbbVmAg_WO4uzHO6qcE",
@@ -39,13 +33,9 @@
 
   const fbApp = initializeApp(firebaseConfig);
   const db = getFirestore(fbApp);
-  const auth = getAuth(fbApp);
 
   // نخبيو هاد الأدوات فـ window باش الكود القديم (غير module) يقدر يستعملهم
-  window.__fb = {
-    db, doc, getDoc, setDoc,
-    auth, signInWithEmailAndPassword, createUserWithEmailAndPassword, signOut
-  };
+  window.__fb = { db, doc, getDoc, setDoc };
   window.dispatchEvent(new Event('firebase-ready'));
 </script>
 
@@ -297,65 +287,43 @@ function updateSaveIndicator() {
 function isAdmin() { return state.currentUser && state.currentUser.role === 'admin'; }
 
 async function loginAdmin(email, pass) {
-  const { auth, signInWithEmailAndPassword } = fb();
-  try {
-    // التحقق الحقيقي من كلمة المرور يتم عند Firebase (مشفّر)، لا نخزّنها أبدًا محليًا
-    const cred = await signInWithEmailAndPassword(auth, email, pass);
-    const uidVal = cred.user.uid;
-    const users = await fsGet('admins', []);
-    let profile = users.find(u => u.uid === uidVal || (u.email || '').toLowerCase() === email.toLowerCase());
-    if (!profile) {
-      // مستخدم موجود فـ Firebase Auth بلا بروفايل فـ Firestore (حالة نادرة) - نديرو بروفايل افتراضي
-      profile = { id: uid(), uid: uidVal, name: email.split('@')[0], email, role: 'admin' };
-      users.push(profile);
-      await fsSet('admins', users);
-    }
-    const { password, ...safe } = profile; // نتأكدو ما فيهش password (توافقية مع بيانات قديمة)
+  const users = await fsGet('admins', []);
+  const found = users.find(u => (u.email || '').toLowerCase() === email.toLowerCase() && u.password === pass);
+  if (found) {
+    const { password, ...safe } = found;
     state.currentUser = safe;
     persistUser();
     return true;
-  } catch (err) {
-    console.error('loginAdmin error:', err.code || err);
-    return false;
   }
+  return false;
 }
 async function signupAdmin(name, email, pass) {
   if (!name || !email || !pass) return false;
-  const { auth, createUserWithEmailAndPassword } = fb();
-  try {
-    const cred = await createUserWithEmailAndPassword(auth, email, pass);
-    const uidVal = cred.user.uid;
-    const users = await fsGet('admins', []);
-    const newUser = { id: uid(), uid: uidVal, name, email, role: 'admin' }; // بلا password إطلاقًا
-    users.push(newUser);
-    await fsSet('admins', users);
-    state.currentUser = newUser;
-    persistUser();
-    return true;
-  } catch (err) {
-    console.error('signupAdmin error:', err.code || err);
-    return false;
-  }
+  const users = await fsGet('admins', []);
+  if (users.some(u => (u.email || '').toLowerCase() === email.toLowerCase())) return false;
+  const newUser = { id: uid(), name, email, role: 'admin', password: pass };
+  users.push(newUser);
+  await fsSet('admins', users);
+  const { password, ...safe } = newUser;
+  state.currentUser = safe;
+  persistUser();
+  return true;
 }
-function loginAsEmployee(name, matricule, accessCode) {
-  state.currentUser = { id: 'emp_' + uid(), name, identifier: matricule || name, accessCode: accessCode || '', role: 'employee' };
+function loginAsEmployee(name, matricule) {
+  state.currentUser = { id: 'emp_' + uid(), name, identifier: matricule || name, role: 'employee' };
   persistUser();
 }
 function logout() {
-  const { auth, signOut } = fb();
-  if (state.currentUser && state.currentUser.role === 'admin') {
-    signOut(auth).catch(err => console.error('signOut error:', err));
-  }
   state.currentUser = null;
   persistUser();
   render();
 }
 function authenticateEmployee(matricule, code) {
   if (!matricule || !code) return null;
-  const matClean = matricule.trim(); // case-sensitive: بلا toLowerCase
+  const matClean = matricule.toLowerCase().trim();
   const codeClean = code.trim();
   return state.savedRecords.find(r => {
-    const rMat = (r.employee.matricule || '').trim();
+    const rMat = (r.employee.matricule || '').toLowerCase().trim();
     const rCode = (r.employee.accessCode || '').trim();
     return rMat === matClean && rCode === codeClean;
   }) || null;
@@ -561,7 +529,7 @@ function renderAuthScreen() {
             <label class="block text-xs font-bold text-gray-500 mb-1">Matricule</label>
             <div class="relative">
               <i class="fas fa-id-badge absolute left-3 top-1/2 -translate-y-1/2 text-gray-400"></i>
-              <input type="text" id="emp-matricule" required autocapitalize="off" autocorrect="off" autocomplete="off" spellcheck="false" class="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:ring-[#007A33] focus:border-[#007A33] text-lg font-medium placeholder-gray-300" placeholder="Ex: 1234">
+              <input type="text" id="emp-matricule" required class="block w-full pl-10 pr-3 py-3 border border-gray-300 rounded-lg focus:ring-[#007A33] focus:border-[#007A33] text-lg font-medium placeholder-gray-300" placeholder="Ex: 1234">
             </div>
           </div>
           <div>
@@ -613,7 +581,7 @@ function attachAuthEvents() {
     if (!matricule || !code) { state.errorMessage = 'Veuillez entrer votre matricule et code.'; render(); return; }
     const record = authenticateEmployee(matricule, code);
     if (record) {
-      loginAsEmployee(record.employee.nomPrenom, record.employee.matricule, record.employee.accessCode);
+      loginAsEmployee(record.employee.nomPrenom, record.employee.matricule);
       state.errorMessage = null;
       render();
     } else {
@@ -721,12 +689,11 @@ function filteredRecords() {
   if (!isAdmin()) {
     const cur = state.currentUser;
     if (cur && cur.identifier) {
-      const searchId = cur.identifier.trim(); // case-sensitive
-      const searchCode = (cur.accessCode || '').trim();
+      const searchId = cur.identifier.toLowerCase().trim();
       records = records.filter(r => {
-        const mat = (r.employee.matricule || '').trim();
-        const code = (r.employee.accessCode || '').trim();
-        return mat === searchId && code === searchCode;
+        const mat = (r.employee.matricule || '').toLowerCase().trim();
+        const nom = (r.employee.nomPrenom || '').toLowerCase().trim();
+        return mat === searchId || nom === searchId || nom.includes(searchId);
       });
     } else return [];
   }
@@ -907,7 +874,7 @@ function renderPayslipEditor() {
         <tr><th style="width:15%">Matricule</th><th>Nom Prénom</th><th>Date Naissance</th><th>Situation Fam.</th><th>Date Embauche</th></tr>
         <tr>
           <td class="relative">
-            <input data-path="employee.matricule" autocapitalize="off" autocorrect="off" spellcheck="false" value="${esc(state.employee.matricule)}" placeholder="---">
+            <input data-path="employee.matricule" value="${esc(state.employee.matricule)}" placeholder="---">
             ${admin ? `
             <button id="toggle-code-edit" class="absolute left-0 top-1/2 -translate-y-1/2 p-1 text-gray-300 hover:text-[#bf0010] transition-colors ${state.showCodeEdit ? 'text-[#bf0010]' : ''}"><i class="fas fa-key text-[10px]"></i></button>
             ${state.showCodeEdit ? `
@@ -1085,7 +1052,7 @@ function renderPayslipPreview() {
           </tr></thead>
           <tbody><tr class="text-black font-bold">
             <td class="border border-black py-1.5 font-mono">${esc(state.employee.matricule)}</td>
-            <td class="border border-black py-1.5 text-center font-extrabold text-[11px] tracking-wide">${esc(state.employee.nomPrenom)}</td>
+            <td class="border border-black py-1.5 uppercase text-center font-extrabold text-[11px] tracking-wide">${esc(state.employee.nomPrenom)}</td>
             <td class="border border-black py-1.5">${esc(state.employee.dateNaissance)}</td>
             <td class="border border-black py-1.5">${esc(state.employee.situationFamiliale)}</td>
             <td class="border border-black py-1.5">${esc(state.employee.dateEmbauche)}</td>
